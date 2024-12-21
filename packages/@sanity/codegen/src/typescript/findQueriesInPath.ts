@@ -58,6 +58,7 @@ export async function* findQueriesInPath({
     debug(`Found file "${filename}"`)
     try {
       const source = await fs.readFile(filename, 'utf8')
+      debug(`File "${filename}" read`)
       const queries = findQueriesInSource(source, filename, babelOptions, resolver)
       // Check and error on duplicate query names, because we can't generate types with the same name.
       for (const query of queries) {
