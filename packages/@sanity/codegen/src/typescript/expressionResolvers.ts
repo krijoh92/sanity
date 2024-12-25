@@ -7,6 +7,7 @@ import * as babelTypes from '@babel/types'
 import createDebug from 'debug'
 
 import {parseSourceFile} from './parseSource'
+import { createHash } from 'node:crypto'
 
 const debug = createDebug('sanity:codegen:findQueries:debug')
 
@@ -39,6 +40,16 @@ export interface NamedQueryResult {
 const TAGGED_TEMPLATE_ALLOW_LIST = ['groq']
 const FUNCTION_WRAPPER_ALLOW_LIST = ['defineQuery']
 
+type Cache = Map<string, resolveExpressionReturnType>
+
+const nodeHash = (node: babelTypes.Node) => {
+  // Create a md5 hash of the node
+
+  const hash = createHash('md5')
+  hash.update(JSON.stringify(node))
+  return hash.digest('hex')
+}
+
 /**
  * resolveExpression takes a node and returns the resolved value of the expression.
  * @beta
@@ -53,6 +64,7 @@ export function resolveExpression({
   babelConfig,
   params = [],
   fnArguments = [],
+  cache: cache_
 }: {
   node: babelTypes.Node
   file: babelTypes.File
@@ -60,18 +72,32 @@ export function resolveExpression({
   filename: string
   resolver: NodeJS.RequireResolve
   babelConfig: TransformOptions
+  cache: Cache
   params?: babelTypes.Node[]
   fnArguments?: babelTypes.Node[]
 }): resolveExpressionReturnType {
   debug(
     `Resolving node ${node.type} in ${filename}:${node.loc?.start.line}:${node.loc?.start.column}`,
   )
+  const cache = cache_ || new Map<string, resolveExpressionReturnType>()
+
+  debug(`Cache size: ${cache.size}`)
+
+  const hashed = nodeHash(node)
+
+  if (cache.has(hashed)) {
+    debug(`Returning cached value for ${node.type} in ${filename}:${node.loc?.start.line}:${node.loc?.start.column}`)
+    return cache.get(hashed) as resolveExpressionReturnType
+  } else {
+    debug(`No cached value for ${node.type} in ${filename}:${node.loc?.start.line}:${node.loc?.start.column}`)
+  }
+
   if (
     babelTypes.isTaggedTemplateExpression(node) &&
     babelTypes.isIdentifier(node.tag) &&
     TAGGED_TEMPLATE_ALLOW_LIST.includes(node.tag.name)
   ) {
-    return resolveExpression({
+    const resolved = resolveExpression({
       node: node.quasi,
       scope,
       filename,
@@ -80,7 +106,12 @@ export function resolveExpression({
       params,
       babelConfig,
       fnArguments,
+      cache,
     })
+
+    cache.set(hashed, resolved)
+
+    return resolved
   }
 
   if (babelTypes.isTemplateLiteral(node)) {
@@ -94,13 +125,19 @@ export function resolveExpression({
         params,
         babelConfig,
         fnArguments,
+        cache
       }),
     )
-    return node.quasis
+    const resolved = node.quasis
       .map((quasi, idx) => {
         return (quasi.value.cooked || '') + (resolvedExpressions[idx] || '')
       })
       .join('')
+
+
+    cache.set(hashed, resolved)
+
+    return resolved
   }
 
   if (babelTypes.isLiteral(node)) {
@@ -112,7 +149,7 @@ export function resolveExpression({
   }
 
   if (babelTypes.isIdentifier(node)) {
-    return resolveIdentifier({
+    const resolved = resolveIdentifier({
       node,
       scope,
       filename,
@@ -121,7 +158,11 @@ export function resolveExpression({
       fnArguments,
       babelConfig,
       params,
+      cache
     })
+
+    cache.set(hashed, resolved)
+    return resolved
   }
 
   if (babelTypes.isVariableDeclarator(node)) {
@@ -130,7 +171,12 @@ export function resolveExpression({
       throw new Error(`Unsupported variable declarator`)
     }
 
-    return resolveExpression({
+    const hashed = nodeHash(init)
+    const cached = cache.get(hashed)
+
+    if (cached) return cached
+
+    const resolved = resolveExpression({
       node: init,
       fnArguments,
       scope,
@@ -138,7 +184,10 @@ export function resolveExpression({
       file,
       babelConfig,
       resolver,
+      cache
     })
+
+    cache.set(hashed, resolved)
   }
 
   if (
@@ -146,7 +195,13 @@ export function resolveExpression({
     babelTypes.isIdentifier(node.callee) &&
     FUNCTION_WRAPPER_ALLOW_LIST.includes(node.callee.name)
   ) {
-    return resolveExpression({
+    const hashed = nodeHash(node.arguments[0])
+
+    const cached = cache.get(hashed)
+
+    if (cached) return cached
+
+    const resolved = resolveExpression({
       node: node.arguments[0],
       scope,
       filename,
@@ -154,7 +209,12 @@ export function resolveExpression({
       resolver,
       babelConfig,
       params,
+      cache
     })
+
+    cache.set(hashed, resolved)
+
+    return resolved
   }
 
   if (babelTypes.isCallExpression(node)) {
@@ -167,6 +227,7 @@ export function resolveExpression({
       babelConfig,
       params,
       fnArguments,
+      cache
     })
   }
 
@@ -193,6 +254,7 @@ export function resolveExpression({
       file,
       babelConfig,
       resolver,
+      cache
     })
   }
 
@@ -204,11 +266,12 @@ export function resolveExpression({
       file,
       babelConfig,
       resolver,
+      cache
     })
   }
 
   if (babelTypes.isImportDefaultSpecifier(node) || babelTypes.isImportSpecifier(node)) {
-    return resolveImportSpecifier({node, file, scope, filename, fnArguments, resolver, babelConfig})
+    return resolveImportSpecifier({node, file, scope, filename, fnArguments, resolver, babelConfig, cache})
   }
 
   if (babelTypes.isAssignmentPattern(node)) {
@@ -221,6 +284,7 @@ export function resolveExpression({
       params,
       babelConfig,
       fnArguments,
+      cache,
     })
   }
 
@@ -238,6 +302,7 @@ function resolveIdentifier({
   babelConfig,
   fnArguments,
   params,
+  cache
 }: {
   node: babelTypes.Identifier
   file: babelTypes.File
@@ -247,6 +312,7 @@ function resolveIdentifier({
   babelConfig: TransformOptions
   fnArguments: babelTypes.Node[]
   params: babelTypes.Node[]
+  cache: Cache
 }): resolveExpressionReturnType {
   const paramIndex = params.findIndex(
     (param) =>
@@ -260,6 +326,9 @@ function resolveIdentifier({
     argument = params[paramIndex].right
   }
   if (argument && babelTypes.isLiteral(argument)) {
+    const cached = cache.get(nodeHash(argument))
+    if (cached) return cached
+
     return resolveExpression({
       node: argument,
       scope,
@@ -269,10 +338,16 @@ function resolveIdentifier({
       params,
       babelConfig,
       fnArguments,
+      cache,
     })
   }
   const binding = scope.getBinding(node.name)
   if (binding) {
+    const hashed = nodeHash(binding.path.node)
+    const cached = cache.get(hashed)
+
+    if (cached) return cached
+
     if (babelTypes.isIdentifier(binding.path.node)) {
       const isSame = binding.path.node.name === node.name
       if (isSame) {
@@ -281,7 +356,7 @@ function resolveIdentifier({
         )
       }
     }
-    return resolveExpression({
+    const resolved = resolveExpression({
       node: binding.path.node,
       params,
       fnArguments,
@@ -290,7 +365,12 @@ function resolveIdentifier({
       babelConfig,
       file,
       resolver,
+      cache,
     })
+
+    cache.set(hashed, resolved)
+
+    return resolved
   }
 
   throw new Error(
@@ -306,6 +386,7 @@ function resolveCallExpression({
   resolver,
   babelConfig,
   params,
+  cache
 }: {
   node: babelTypes.CallExpression
   file: babelTypes.File
@@ -315,9 +396,16 @@ function resolveCallExpression({
   babelConfig: TransformOptions
   fnArguments: babelTypes.Node[]
   params: babelTypes.Node[]
+  cache: Cache
 }): resolveExpressionReturnType {
   const {callee} = node
-  return resolveExpression({
+  const hashed = nodeHash(callee)
+
+  const cached = cache.get(hashed)
+
+  if (cached) return cached
+
+  const resolved = resolveExpression({
     node: callee,
     scope,
     filename,
@@ -326,7 +414,12 @@ function resolveCallExpression({
     babelConfig,
     params,
     fnArguments: node.arguments,
+    cache,
   })
+
+  cache.set(hashed, resolved)
+
+  return resolved
 }
 
 function resolveImportSpecifier({
@@ -336,6 +429,7 @@ function resolveImportSpecifier({
   fnArguments,
   resolver,
   babelConfig,
+  cache
 }: {
   node: babelTypes.ImportDefaultSpecifier | babelTypes.ImportSpecifier | babelTypes.ExportSpecifier
   file: babelTypes.File
@@ -343,7 +437,8 @@ function resolveImportSpecifier({
   filename: string
   fnArguments: babelTypes.Node[]
   resolver: NodeJS.RequireResolve
-  babelConfig: TransformOptions
+  babelConfig: TransformOptions,
+  cache: Cache
 }): resolveExpressionReturnType {
   let importDeclaration: babelTypes.ImportDeclaration | undefined
   traverse(file, {
@@ -401,6 +496,7 @@ function resolveImportSpecifier({
       babelConfig,
       filename: resolvedFile,
       resolver,
+      cache
     })
   }
 
@@ -432,6 +528,7 @@ function resolveImportSpecifier({
       fnArguments,
       resolver,
       babelConfig,
+      cache
     })
   }
 
@@ -447,6 +544,7 @@ function resolveImportSpecifier({
             fnArguments,
             resolver,
             babelConfig,
+            cache
           })
         } catch (e) {
           if (e.cause !== `noBinding:${importName}`) throw e
@@ -466,6 +564,7 @@ function resolveExportSpecifier({
   fnArguments,
   babelConfig,
   resolver,
+  cache
 }: {
   node: babelTypes.ExportNamedDeclaration | babelTypes.ExportAllDeclaration
   importName: string
@@ -473,6 +572,7 @@ function resolveExportSpecifier({
   fnArguments: babelTypes.Node[]
   babelConfig: TransformOptions
   resolver: NodeJS.RequireResolve
+  cache: Cache
 }): resolveExpressionReturnType {
   if (!node.source) {
     throw new Error(`Could not find source for export "${importName}" in ${filename}`)
@@ -504,6 +604,7 @@ function resolveExportSpecifier({
       babelConfig,
       resolver,
       fnArguments,
+      cache
     })
   }
 

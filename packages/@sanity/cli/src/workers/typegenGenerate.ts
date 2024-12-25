@@ -80,6 +80,8 @@ async function main() {
     length: schema.length,
   } satisfies TypegenGenerateTypesWorkerMessage)
 
+  $info(`Processing queries in "${opts.searchPath}"...`)
+
   const queries = findQueriesInPath({
     path: opts.searchPath,
     resolver,

@@ -3,6 +3,7 @@ import {createRequire} from 'node:module'
 import {type NodePath, type TransformOptions, traverse} from '@babel/core'
 import {type Scope} from '@babel/traverse'
 import * as babelTypes from '@babel/types'
+import createDebug from 'debug'
 
 import {getBabelConfig} from '../getBabelConfig'
 import {type NamedQueryResult, resolveExpression} from './expressionResolvers'
@@ -10,12 +11,18 @@ import {parseSourceFile} from './parseSource'
 
 const require = createRequire(__filename)
 
+
+const $info = createDebug('sanity:codegen:findQueries:info')
+
 const groqTagName = 'groq'
 const defineQueryFunctionName = 'defineQuery'
 const groqModuleName = 'groq'
 const nextSanityModuleName = 'next-sanity'
 
 const ignoreValue = '@sanity-typegen-ignore'
+
+
+const resolveCache = new Map<string, ReturnType<typeof resolveExpression>>()
 
 /**
  * findQueriesInSource takes a source string and returns all GROQ queries in it.
@@ -42,6 +49,8 @@ export function findQueriesInSource(
     VariableDeclarator(path) {
       const {node, scope} = path
 
+      $info(`Checking VariableDeclarator "${node.loc?.filename}:${node.loc?.start.line}-${node.loc?.end.line}"`)
+
       const init = node.init
 
       // Look for tagged template expressions that are called with the `groq` tag
@@ -57,6 +66,8 @@ export function findQueriesInSource(
           isImportFrom(nextSanityModuleName, defineQueryFunctionName, scope, init.callee))
 
       if (babelTypes.isIdentifier(node.id) && (isGroqTemplateTag || isDefineQueryCall)) {
+
+        $info(`Checking VariableDeclarator "${node.id.name}"`)
         // If we find a comment leading the decleration which macthes with ignoreValue we don't add
         // the query
         if (declarationLeadingCommentContains(path, ignoreValue)) {
@@ -71,6 +82,7 @@ export function findQueriesInSource(
           babelConfig,
           filename,
           resolver,
+          cache: resolveCache
         })
 
         const location = node.loc
